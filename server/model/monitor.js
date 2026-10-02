@@ -423,6 +423,7 @@ class Monitor extends BeanModel {
     async start(io) {
         let previousBeat = null;
         let retries = 0;
+        let pausedByDependency = false;
 
         this.rootCertificates = rootCertificates;
 
@@ -443,6 +444,32 @@ class Monitor extends BeanModel {
                 if (beatInterval < 20) {
                     console.log("beat interval too low, reset to 20s");
                     beatInterval = 20;
+                }
+            }
+
+            // Skip checks while a monitor this one depends on is down,
+            // so its outage does not count against this monitor
+            const pauseReason = MonitorDependency.getInstance().getPauseReason(this.id);
+            if (pauseReason.length > 0 || pausedByDependency) {
+                if (pauseReason.length > 0) {
+                    if (!pausedByDependency) {
+                        log.info(
+                            "monitor",
+                            `[${this.name}] Checks paused: depends on ${pauseReason.map((n) => `"${n}"`).join(", ")}, which is down`
+                        );
+                    }
+                    pausedByDependency = true;
+                } else {
+                    log.info("monitor", `[${this.name}] Checks resumed: dependencies are back up`);
+                    pausedByDependency = false;
+                }
+
+                // Push monitors get a full interval to receive a push after resuming
+                if (pausedByDependency || this.type === "push") {
+                    if (!this.isStop) {
+                        this.heartbeatInterval = setTimeout(safeBeat, beatInterval * 1000);
+                    }
+                    return;
                 }
             }
 

@@ -206,6 +206,18 @@ class MonitorDependency {
     }
 
     /**
+     * Check if the monitor's checks should be skipped because a monitor it
+     * depends on is down or under maintenance. No heartbeats are recorded
+     * while paused, so the outage of a dependency does not affect the
+     * uptime statistics of this monitor.
+     * @param {number} monitorID Monitor ID
+     * @returns {string[]} Names of the blocking dependencies, empty if not paused
+     */
+    getPauseReason(monitorID) {
+        return this.getBlockingAncestors(monitorID).map((id) => this.getName(id));
+    }
+
+    /**
      * Check if any ancestor is PENDING (retrying)
      * @param {number} monitorID Monitor ID
      * @returns {boolean} True if any ancestor is pending
