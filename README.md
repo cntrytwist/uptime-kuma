@@ -1,3 +1,28 @@
+## About this fork
+
+This fork of [Uptime Kuma](https://github.com/louislam/uptime-kuma) adds **monitor dependencies**.
+
+**Why:** when an upstream link or router goes down, Uptime Kuma alerts for every monitor behind it. One outage turns into a flood of notifications. See upstream issue [#1089](https://github.com/louislam/uptime-kuma/issues/1089).
+
+**What it adds:**
+
+- A **Depends on** field on each monitor, with support for chains and multiple dependencies.
+- While a dependency is down, the dependent monitors' alerts are suppressed. The dependency's alert lists the monitors it may affect.
+- A short, configurable hold time handles monitors that fail before their dependency's next check.
+- A monitor that is still down after its dependency recovers sends its own alert.
+
+**Branches:**
+
+- `deploy/2.5.5-dependencies`: the official 2.5.5 release plus this feature, running in production.
+- `feat/monitor-dependencies`: the same feature on upstream's development branch.
+- `master`: an unchanged mirror of upstream.
+
+This is not an official Uptime Kuma release. The plan is to propose the feature upstream. Until then, it's kept up to date with new Uptime Kuma releases.
+
+**Database change:** the feature adds one table and one column. Back up your database before switching. To go back to official Uptime Kuma, you need that backup.
+
+---
+
 <div align="center" width="100%">
     <img src="./public/icon.svg" width="128" alt="Uptime Kuma Logo" />
 </div>
