@@ -152,6 +152,7 @@ const passwordHash = require("./password-hash");
 
 const { Prometheus } = require("./prometheus");
 const { UptimeCalculator } = require("./uptime-calculator");
+const { MonitorDependency } = require("./monitor-dependency");
 
 const hostname = config.hostname;
 
@@ -748,6 +749,15 @@ let needSetup = false;
                 let notificationIDList = monitor.notificationIDList;
                 delete monitor.notificationIDList;
 
+                const dependsOn = await MonitorDependency.getInstance().validate(
+                    undefined,
+                    socket.userID,
+                    monitor.dependsOn
+                );
+                delete monitor.dependsOn;
+                const dependencyHoldSeconds = monitor.dependencyHoldSeconds;
+                delete monitor.dependencyHoldSeconds;
+
                 // Ensure status code ranges are strings
                 if (!monitor.accepted_statuscodes.every((code) => typeof code === "string")) {
                     throw new Error("Accepted status codes are not all strings");
@@ -782,6 +792,9 @@ let needSetup = false;
                 if (monitor.retryOnlyOnStatusCodeFailure !== undefined) {
                     bean.retry_only_on_status_code_failure = monitor.retryOnlyOnStatusCodeFailure;
                 }
+                if (dependencyHoldSeconds !== undefined) {
+                    bean.dependency_hold_seconds = parseDependencyHoldSeconds(dependencyHoldSeconds);
+                }
                 bean.user_id = socket.userID;
 
                 bean.validate();
@@ -789,6 +802,8 @@ let needSetup = false;
                 await R.store(bean);
 
                 await updateMonitorNotification(bean.id, notificationIDList);
+
+                await MonitorDependency.getInstance().save(bean.id, dependsOn);
 
                 await server.sendUpdateMonitorIntoList(socket, bean.id);
 
@@ -833,6 +848,12 @@ let needSetup = false;
                         throw new Error("Invalid Monitor Group");
                     }
                 }
+
+                const dependsOn = await MonitorDependency.getInstance().validate(
+                    bean.id,
+                    socket.userID,
+                    monitor.dependsOn
+                );
 
                 // Remove children if monitor type has changed (from group to non-group)
                 if (bean.type === "group" && monitor.type !== bean.type) {
@@ -944,6 +965,9 @@ let needSetup = false;
                 bean.snmpOid = monitor.snmpOid;
                 bean.jsonPathOperator = monitor.jsonPathOperator;
                 bean.retry_only_on_status_code_failure = Boolean(monitor.retryOnlyOnStatusCodeFailure);
+                if (monitor.dependencyHoldSeconds !== undefined) {
+                    bean.dependency_hold_seconds = parseDependencyHoldSeconds(monitor.dependencyHoldSeconds);
+                }
                 bean.timeout = monitor.timeout;
                 bean.rabbitmqNodes = JSON.stringify(monitor.rabbitmqNodes);
                 bean.rabbitmqUsername = monitor.rabbitmqUsername;
@@ -976,6 +1000,8 @@ let needSetup = false;
                 }
 
                 await updateMonitorNotification(bean.id, monitor.notificationIDList);
+
+                await MonitorDependency.getInstance().save(bean.id, dependsOn);
 
                 if (await Monitor.isActive(bean.id, bean.active)) {
                     await restartMonitor(socket.userID, bean.id);
@@ -1181,8 +1207,16 @@ let needSetup = false;
                     }
                 }
 
+                const dependentIDs = MonitorDependency.getInstance().dependents.get(monitorID) || [];
+
                 // Delete the monitor itself
                 await Monitor.deleteMonitor(monitorID, socket.userID);
+
+                // Dependency rows are removed by ON DELETE CASCADE
+                await MonitorDependency.getInstance().reload();
+                for (const dependentID of dependentIDs) {
+                    await server.sendUpdateMonitorIntoList(socket, dependentID);
+                }
 
                 // Fix #2880
                 apicache.clear();
@@ -1777,6 +1811,7 @@ let needSetup = false;
     server.httpServer.listen(port, hostname, async () => {
         printServerUrls("server", port, hostname, config.isSSL);
 
+        await MonitorDependency.getInstance().reload();
         await startMonitors();
 
         // Put this here. Start background jobs after the db and server is ready to prevent clear up during db migration.
@@ -1788,6 +1823,20 @@ let needSetup = false;
     // Start cloudflared at the end if configured
     await cloudflaredAutoStart(cloudflaredToken);
 })();
+
+/**
+ * Parse and validate the dependency hold time of a monitor
+ * @param {any} value Hold time in seconds
+ * @returns {number} Hold time in seconds
+ * @throws {Error} Invalid value
+ */
+function parseDependencyHoldSeconds(value) {
+    const seconds = parseInt(value);
+    if (isNaN(seconds) || seconds < 0 || seconds > 3600) {
+        throw new Error("Dependency hold time must be between 0 and 3600 seconds");
+    }
+    return seconds;
+}
 
 /**
  * Update notifications for a given monitor

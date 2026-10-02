@@ -2263,6 +2263,41 @@
                                 />
                             </div>
 
+                            <!-- Monitor Dependencies -->
+                            <div class="my-3">
+                                <label for="dependsOn" class="form-label">{{ $t("Depends on") }}</label>
+                                <VueMultiselect
+                                    id="dependsOn"
+                                    v-model="dependsOnSelection"
+                                    :options="dependsOnOptions"
+                                    :multiple="true"
+                                    :close-on-select="false"
+                                    :clear-on-select="false"
+                                    :preserve-search="true"
+                                    :placeholder="$t('Pick monitors...')"
+                                    label="pathName"
+                                    track-by="id"
+                                ></VueMultiselect>
+                                <div class="form-text">{{ $t("dependsOnDescription") }}</div>
+                            </div>
+
+                            <div v-if="monitor.dependsOn && monitor.dependsOn.length > 0" class="my-3">
+                                <label for="dependency-hold-seconds" class="form-label">
+                                    {{ $t("dependencyHoldSeconds") }}
+                                </label>
+                                <input
+                                    id="dependency-hold-seconds"
+                                    v-model="monitor.dependencyHoldSeconds"
+                                    type="number"
+                                    class="form-control"
+                                    required
+                                    min="0"
+                                    max="3600"
+                                    step="1"
+                                />
+                                <div class="form-text">{{ $t("dependencyHoldSecondsDescription") }}</div>
+                            </div>
+
                             <!-- Description -->
                             <div class="my-3">
                                 <label for="description" class="form-label">{{ $t("Description") }}</label>
@@ -3358,6 +3393,8 @@ const monitorDefaults = {
     type: "http",
     name: "",
     parent: null,
+    dependsOn: [],
+    dependencyHoldSeconds: 60,
     url: defaultValueList.http.url,
     wsSubprotocol: "",
     method: "GET",
@@ -3684,6 +3721,43 @@ message HealthCheckResponse {
             });
 
             return result;
+        },
+
+        /**
+         * Monitors that can be selected as dependencies: all except this
+         * monitor and monitors that (transitively) depend on it
+         * @returns {object[]} Monitors sorted by path name
+         */
+        dependsOnOptions() {
+            const monitors = Object.values(this.$root.monitorList);
+            const excluded = new Set();
+
+            if (this.monitor.id) {
+                excluded.add(this.monitor.id);
+                let added = true;
+                while (added) {
+                    added = false;
+                    for (const m of monitors) {
+                        if (!excluded.has(m.id) && (m.dependsOn || []).some((id) => excluded.has(id))) {
+                            excluded.add(m.id);
+                            added = true;
+                        }
+                    }
+                }
+            }
+
+            return monitors.filter((m) => !excluded.has(m.id)).sort((m1, m2) => m1.pathName.localeCompare(m2.pathName));
+        },
+
+        dependsOnSelection: {
+            get() {
+                return (this.monitor.dependsOn || [])
+                    .map((id) => this.$root.monitorList[id])
+                    .filter((m) => m !== undefined);
+            },
+            set(selection) {
+                this.monitor.dependsOn = selection.map((m) => m.id);
+            },
         },
 
         /**

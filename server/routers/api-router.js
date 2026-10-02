@@ -17,6 +17,7 @@ const { makeBadge } = require("badge-maker");
 const { Prometheus } = require("../prometheus");
 const Database = require("../database");
 const { UptimeCalculator } = require("../uptime-calculator");
+const { MonitorDependency } = require("../monitor-dependency");
 const { Settings } = require("../settings");
 
 let router = express.Router();
@@ -99,14 +100,18 @@ router.all("/api/push/:pushToken", async (request, response) => {
 
         bean.important = Monitor.isImportantBeat(isFirstBeat, previousHeartbeat?.status, bean.status);
 
+        await MonitorDependency.getInstance().recordStatus(monitor.id, bean.status);
+
         if (Monitor.isImportantForNotification(isFirstBeat, previousHeartbeat?.status, bean.status)) {
             // Reset down count
             bean.downCount = 0;
 
             log.debug("monitor", `[${monitor.name}] sendNotification`);
-            await Monitor.sendNotification(isFirstBeat, monitor, bean);
+            await Monitor.sendDependencyAwareNotification(isFirstBeat, monitor, bean);
         } else {
-            if (bean.status === DOWN && monitor.resendInterval > 0) {
+            const withheld = bean.status === DOWN && (await Monitor.checkDependencyStillDown(monitor, bean));
+
+            if (bean.status === DOWN && monitor.resendInterval > 0 && !withheld) {
                 ++bean.downCount;
                 if (bean.downCount >= monitor.resendInterval) {
                     // Send notification again, because we are still DOWN
