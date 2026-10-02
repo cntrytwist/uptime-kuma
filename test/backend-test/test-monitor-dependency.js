@@ -211,6 +211,41 @@ describe("MonitorDependency notifications", () => {
     });
 });
 
+describe("MonitorDependency pause", () => {
+    test("checks are paused while a transitive dependency is DOWN or in maintenance", async () => {
+        const ctx = setup([
+            [3, 2],
+            [4, 3],
+        ]);
+        await ctx.deps.recordStatus(2, UP);
+        await ctx.deps.recordStatus(3, UP);
+        assert.deepStrictEqual(ctx.deps.getPauseReason(4), []);
+
+        await ctx.deps.recordStatus(2, DOWN);
+        assert.deepStrictEqual(ctx.deps.getPauseReason(4), ["inets"]);
+        assert.deepStrictEqual(ctx.deps.getPauseReason(3), ["inets"]);
+
+        await ctx.deps.recordStatus(2, MAINTENANCE);
+        assert.deepStrictEqual(ctx.deps.getPauseReason(4), ["inets"]);
+
+        await ctx.deps.recordStatus(2, UP);
+        assert.deepStrictEqual(ctx.deps.getPauseReason(4), []);
+    });
+
+    test("not paused while a dependency is only PENDING", async () => {
+        const ctx = setup([[4, 2]]);
+        await ctx.deps.recordStatus(2, PENDING);
+        assert.deepStrictEqual(ctx.deps.getPauseReason(4), []);
+    });
+
+    test("not paused when a dependency was paused manually (forgotten)", async () => {
+        const ctx = setup([[4, 2]]);
+        await ctx.deps.recordStatus(2, DOWN);
+        ctx.deps.forget(2);
+        assert.deepStrictEqual(ctx.deps.getPauseReason(4), []);
+    });
+});
+
 describe("MonitorDependency multiple parents", () => {
     test("suppressed if any parent is DOWN", async () => {
         const ctx = setup([
