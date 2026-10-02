@@ -53,6 +53,7 @@ const { UptimeKumaServer } = require("../uptime-kuma-server");
 const { DockerHost } = require("../docker");
 const crypto = require("crypto");
 const { UptimeCalculator } = require("../uptime-calculator");
+const { MonitorDependency } = require("../monitor-dependency");
 const { CookieJar } = require("tough-cookie");
 const { HttpsCookieAgent } = require("http-cookie-agent/http");
 const https = require("https");
@@ -129,6 +130,8 @@ class Monitor extends BeanModel {
             path,
             pathName,
             parent: this.parent,
+            dependsOn: preloadData.dependsOn?.get(this.id) || [],
+            dependencyHoldSeconds: this.dependency_hold_seconds ?? 60,
             childrenIDs: preloadData.childrenIDs.get(this.id) || [],
             url: this.url,
             wsIgnoreSecWebsocketAcceptHeader: this.getWsIgnoreSecWebsocketAcceptHeader(),
@@ -962,6 +965,8 @@ class Monitor extends BeanModel {
 
             bean.retries = retries;
 
+            await MonitorDependency.getInstance().recordStatus(this.id, bean.status);
+
             log.debug("monitor", `[${this.name}] Check isImportant`);
             let isImportant = Monitor.isImportantBeat(isFirstBeat, previousBeat?.status, bean.status);
 
@@ -972,7 +977,7 @@ class Monitor extends BeanModel {
 
                 if (Monitor.isImportantForNotification(isFirstBeat, previousBeat?.status, bean.status)) {
                     log.debug("monitor", `[${this.name}] sendNotification`);
-                    await Monitor.sendNotification(isFirstBeat, this, bean);
+                    await Monitor.sendDependencyAwareNotification(isFirstBeat, this, bean);
                 } else {
                     log.debug(
                         "monitor",
@@ -991,7 +996,9 @@ class Monitor extends BeanModel {
             } else {
                 bean.important = false;
 
-                if (bean.status === DOWN && this.resendInterval > 0) {
+                const withheld = bean.status === DOWN && (await Monitor.checkDependencyStillDown(this, bean));
+
+                if (bean.status === DOWN && this.resendInterval > 0 && !withheld) {
                     ++bean.downCount;
                     if (bean.downCount >= this.resendInterval) {
                         // Send notification again, because we are still DOWN
@@ -1216,6 +1223,8 @@ class Monitor extends BeanModel {
     async stop() {
         clearTimeout(this.heartbeatInterval);
         this.isStop = true;
+
+        MonitorDependency.getInstance().forget(this.id);
 
         this.prometheus?.remove();
     }
@@ -1448,13 +1457,57 @@ class Monitor extends BeanModel {
     }
 
     /**
-     * Send a notification about a monitor
+     * Send a notification for a status change, unless it is suppressed or
+     * held because a monitor it depends on is down
      * @param {boolean} isFirstBeat Is this beat the first of this monitor?
      * @param {Monitor} monitor The monitor to send a notification about
      * @param {import("./heartbeat")} bean Status information about monitor
      * @returns {Promise<void>}
      */
-    static async sendNotification(isFirstBeat, monitor, bean) {
+    static async sendDependencyAwareNotification(isFirstBeat, monitor, bean) {
+        const originalMsg = bean.msg;
+        const { action, note } = MonitorDependency.getInstance().decide(
+            monitor.id,
+            bean.status,
+            monitor.dependency_hold_seconds ?? 60,
+            (releaseNote) => Monitor.sendNotification(isFirstBeat, monitor, bean, `${originalMsg} ${releaseNote}`)
+        );
+
+        if (note) {
+            bean.msg = `${bean.msg} ${note}`;
+        }
+
+        if (action === "send") {
+            await Monitor.sendNotification(isFirstBeat, monitor, bean);
+        } else {
+            log.info("monitor", `[${monitor.name}] Notification ${action}: ${note}`);
+        }
+    }
+
+    /**
+     * For a DOWN beat that is not a status change: send the DOWN notification
+     * of a monitor whose alert was suppressed, once its dependencies recovered
+     * @param {Monitor} monitor The monitor
+     * @param {import("./heartbeat")} bean Status information about monitor
+     * @returns {Promise<boolean>} True if resend notifications should be skipped
+     */
+    static async checkDependencyStillDown(monitor, bean) {
+        return await MonitorDependency.getInstance().checkStillDown(
+            monitor.id,
+            monitor.dependency_hold_seconds ?? 60,
+            (note) => Monitor.sendNotification(false, monitor, bean, `${bean.msg} ${note}`)
+        );
+    }
+
+    /**
+     * Send a notification about a monitor
+     * @param {boolean} isFirstBeat Is this beat the first of this monitor?
+     * @param {Monitor} monitor The monitor to send a notification about
+     * @param {import("./heartbeat")} bean Status information about monitor
+     * @param {string|null} msgOverride Message to send instead of the heartbeat message
+     * @returns {Promise<void>}
+     */
+    static async sendNotification(isFirstBeat, monitor, bean, msgOverride = null) {
         if (!isFirstBeat || bean.status === DOWN) {
             const notificationList = await Monitor.getNotificationList(monitor);
 
@@ -1465,9 +1518,22 @@ class Monitor extends BeanModel {
                 text = "🔴 Down";
             }
 
-            let msg = `[${monitor.name}] [${text}] ${bean.msg}`;
+            const beatMsg = msgOverride ?? bean.msg;
+            let msg = `[${monitor.name}] [${text}] ${beatMsg}`;
 
             const heartbeatJSON = await bean.toJSONAsync({ decodeResponse: true });
+            if (msgOverride !== null) {
+                heartbeatJSON["msg"] = msgOverride;
+            }
+
+            // List the monitors that depend on this one
+            const rollup = MonitorDependency.getInstance().getRollup(monitor.id, bean.status);
+            if (rollup.text) {
+                msg += `\n${rollup.text}`;
+            }
+            if (rollup.dependents.length > 0) {
+                heartbeatJSON["dependents"] = rollup.dependents;
+            }
             const monitorData = [{ id: monitor.id, active: monitor.active, name: monitor.name }];
             const preloadData = await Monitor.preparePreloadData(monitorData);
             // Prevent if the msg is undefined, notifications such as Discord cannot send out.
@@ -1830,6 +1896,7 @@ class Monitor extends BeanModel {
         const activeStatusMap = new Map();
         const forceInactiveMap = new Map();
         const pathsMap = new Map();
+        let dependsOnMap = new Map();
 
         if (monitorData.length > 0) {
             const monitorIDs = monitorData.map((monitor) => monitor.id);
@@ -1846,6 +1913,7 @@ class Monitor extends BeanModel {
                 monitorData.map((monitor) => Monitor.isParentActive(monitor.id))
             );
             const paths = await Promise.all(monitorData.map((monitor) => Monitor.getAllPath(monitor.id, monitor.name)));
+            dependsOnMap = await MonitorDependency.getDependsOnMap(monitorIDs);
 
             notifications.forEach((row) => {
                 if (!notificationsMap.has(row.monitor_id)) {
@@ -1896,6 +1964,7 @@ class Monitor extends BeanModel {
             activeStatus: activeStatusMap,
             forceInactive: forceInactiveMap,
             paths: pathsMap,
+            dependsOn: dependsOnMap,
         };
     }
 

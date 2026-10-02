@@ -25,6 +25,23 @@
                     />
                 </div>
             </div>
+            <p v-if="dependsOnMonitors.length > 0 || requiredByMonitors.length > 0" class="dependencies">
+                <span v-if="dependsOnMonitors.length > 0">
+                    {{ $t("Depends on") }}:
+                    <template v-for="(m, index) in dependsOnMonitors" :key="m.id">
+                        <span v-if="index > 0">,</span>
+                        <router-link :to="monitorURL(m.id)">{{ m.name }}</router-link>
+                    </template>
+                </span>
+                <span v-if="dependsOnMonitors.length > 0 && requiredByMonitors.length > 0">·</span>
+                <span v-if="requiredByMonitors.length > 0">
+                    {{ $t("Required by") }}:
+                    <template v-for="(m, index) in requiredByMonitors" :key="m.id">
+                        <span v-if="index > 0">,</span>
+                        <router-link :to="monitorURL(m.id)">{{ m.name }}</router-link>
+                    </template>
+                </span>
+            </p>
             <p class="url">
                 <a
                     v-if="
@@ -501,6 +518,16 @@ export default {
         };
     },
     computed: {
+        dependsOnMonitors() {
+            return (this.monitor.dependsOn || [])
+                .map((id) => this.$root.monitorList[id])
+                .filter((m) => m !== undefined);
+        },
+
+        requiredByMonitors() {
+            return Object.values(this.$root.monitorList).filter((m) => (m.dependsOn || []).includes(this.monitor.id));
+        },
+
         monitor() {
             let id = this.$route.params.id;
             return this.$root.monitorList[id];
@@ -920,6 +947,11 @@ export default {
             padding-top: 4px;
         }
     }
+}
+
+.dependencies {
+    margin-bottom: 8px;
+    font-size: 14px;
 }
 
 .url {
